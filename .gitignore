@@ -1,4 +1,6 @@
 local_secrets/
 exports/
 memory/
+MEMORY.md
 test-config.yaml
+.reflection-state.json

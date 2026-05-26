@@ -7,7 +7,7 @@ Detects variable drift between two Octopus Deploy servers, or one server over ti
 Two Python scripts, used independently:
 
 1. **`variable-export.py`** — Connects to one Octopus server and exports all variables (library variable sets, project variables, tenant variables) to a structured, deterministic YAML file.
-2. **`variable-diff.py`** — Compares two YAML exports and shows differences in unified diff format.
+2. **`variable-compare.py`** — Compares two YAML exports using a recursive set difference and reports drift. Dicts are compared by key set; lists are compared as multisets, so two scoped entries with identical content but in different list positions are NOT reported as a difference.
 
 The YAML output is sorted and deterministic, so running the export twice against the same server produces identical output (assuming no changes occurred). This makes it suitable for tracking variable changes over time.
 
@@ -49,34 +49,47 @@ python scripts/octopus-variable-export.py \
 ### Compare two exports
 
 ```bash
-python scripts/octopus-variable-diff.py \
+python scripts/variable-compare.py \
     octopus-onprem.mydomain.com.2026-03-20-143022-variables.yaml \
     mydomain.octopus.app.2026-03-20-143045-variables.yaml
 ```
 
+Output is grouped into "Only in A", "Only in B", and "Differing values" sections, each labelled with the full path (e.g. `Default > library_variable_sets > set-name > variables > VarName`). Entries that exist in both files but appear in a different list position are treated as equal and not reported.
+
 Options:
-- `--label-a` / `--label-b` — Custom labels in diff output (e.g. `--label-a "On-Prem" --label-b "Cloud"`)
-- `--context-lines N` — Lines of context around changes (default: 3)
-- `-o FILE` — Write diff to a file instead of stdout
+- `--decode` — Decode base64 variable values in memory before comparison or display
+- `--label-a` / `--label-b` — Custom labels in the report (e.g. `--label-a "On-Prem" --label-b "Cloud"`)
+- `-o FILE` — Write the report to a file instead of stdout
+
+Exit codes: `0` (no differences), `1` (differences found), `2` (usage/file error).
+
+### Decode a single file
+
+```bash
+python scripts/variable-compare.py --decode onprem-variables.yaml
+```
+
+With one file and `--decode`, the script prints the YAML with base64-encoded values decoded — useful for spot-checking what's actually inside an export.
 
 ### Track changes over time
 
-Run the export periodically and diff consecutive snapshots:
+Run the export periodically and compare consecutive snapshots:
 
 ```bash
-python scripts/octopus-variable-diff.py \
+python scripts/variable-compare.py \
     mydomain.octopus.app.2026-03-18-090000-variables.yaml \
     mydomain.octopus.app.2026-03-21-093000-variables.yaml
 ```
 
 ## Windows Usage
 
-The scripts work on Windows with Python 3.10+ installed. For comparing YAML files, you can also use:
+The scripts work on Windows with Python 3.10+ installed. For ad-hoc comparison of YAML files, you can also use:
 
-- **VS Code** — Open both files and use `File > Compare Active File With...`
+- **VS Code** — Open both files and use `File > Compare Active File With...` (line-by-line; will flag reordering as drift)
 - **WinMerge** — Free, open-source diff tool: https://winmerge.org
 - **Beyond Compare** — Commercial diff tool with excellent YAML support
-- **PowerShell** — `Compare-Object (Get-Content file1.yaml) (Get-Content file2.yaml)`
+
+For drift detection that ignores list ordering, prefer `variable-compare.py`.
 
 ## YAML Structure
 

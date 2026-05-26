@@ -1,0 +1,73 @@
+SpaceTwo:
+  library_variable_sets:
+    shared-secrets:
+      variables:
+        encryption.key:
+        - value: ==UNABLE_TO_DECODE==
+          scope: {}
+        secret.key:
+        - value: ==UNABLE_TO_DECODE==
+          scope: {}
+SpaceOne:
+  projects:
+    payment-service:
+      variables:
+        timeout:
+        - value: MzA=
+          scope: {}
+    api-service:
+      variables:
+        worker.count:
+        - value: Mg==
+          scope:
+            environment:
+            - Staging
+        - value: NA==
+          scope:
+            environment:
+            - Production
+    web-app:
+      variables:
+        port:
+        - value: ODA4MA==
+          scope: {}
+        log.level:
+        - value: REVCVUc=
+          scope:
+            environment:
+            - Staging
+            - Development
+        - value: SU5GTw==
+          scope:
+            environment:
+            - Production
+  library_variable_sets:
+    notification-config:
+      variables:
+        email.sender:
+        - value: bm8tcmVwbHlAZXhhbXBsZS5jb20=
+          scope: {}
+        slack.webhook:
+        - value: aHR0cHM6Ly9ob29rcy5zbGFjay5jb20vc2VydmljZXMvWFhYWVla
+          scope: {}
+    common-config:
+      variables:
+        api.key:
+        - value: ==UNABLE_TO_DECODE==
+          scope: {}
+        cache.ttl:
+        - value: MzAw
+          scope: {}
+        database.host:
+        - value: ZGV2LWRiLmV4YW1wbGUuY29t
+          scope:
+            environment:
+            - Development
+        - value: c3RhZ2luZy1kYi5leGFtcGxlLmNvbQ==
+          scope:
+            environment:
+            - Staging
+        - value: bmV3LXByb2QtZGIuZXhhbXBsZS5jb20=
+          scope:
+            environment:
+            - Production

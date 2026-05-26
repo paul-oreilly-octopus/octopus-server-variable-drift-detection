@@ -46,6 +46,40 @@ python scripts/octopus-variable-export.py \
     --space "Default" --space "Production"
 ```
 
+### Share-safe export (hashed values)
+
+`--hash-values` replaces every variable value with its SHA-256 hash, so the file can be shared without exposing the values. Drift detection still works because identical inputs hash to identical digests.
+
+```bash
+python scripts/variable-export.py \
+    --server-url https://octopus-onprem.mydomain.com \
+    --api-key-file /path/to/key.txt \
+    --hash-values
+```
+
+Output goes to `…-variables-hashed.yaml`.
+
+**Security caveat — this is hashing, not encryption.** Low-entropy values (environment names like `Production`, port numbers like `5432`, common booleans) can be recovered in seconds by hashing candidate strings. Only high-entropy values (random passwords, GUIDs, long connection strings) are meaningfully protected. Variable *names* are not hashed.
+
+To defeat pre-computed rainbow tables, supply a salt via `--salt-file`. The salt file must contain the same bytes on every server being compared (otherwise drift detection fails). Reading from a file rather than the command line avoids leaking the salt through process listings (`ps`).
+
+```bash
+# Generate a salt once and share it via your usual secret-distribution channel
+openssl rand -hex 32 > /path/to/shared-salt.txt
+
+python scripts/variable-export.py \
+    --server-url https://octopus-onprem.mydomain.com \
+    --api-key-file /path/to/onprem-api-key.txt \
+    --hash-values --salt-file /path/to/shared-salt.txt
+
+python scripts/variable-export.py \
+    --server-url https://mydomain.octopus.app \
+    --api-key-file /path/to/cloud-api-key.txt \
+    --hash-values --salt-file /path/to/shared-salt.txt
+```
+
+A salt does not protect against an attacker who also has the salt — they can still brute-force low-entropy values, just one server at a time rather than across many.
+
 ### Compare two exports
 
 ```bash
@@ -120,6 +154,7 @@ For drift detection that ignores list ordering, prefer `variable-compare.py`.
 ```
 
 - Variable values are base64-encoded to safely handle multi-line strings and special characters
-- Sensitive variables show `==UNABLE_TO_DECODE==` (the API does not return their values)
+- With `--hash-values`, values are replaced by `sha256:<hex>` (or HMAC-SHA256 under `--salt-file`) and the filename gains a `-hashed` suffix
+- Sensitive variables show `==UNABLE_TO_DECODE==` (the API does not return their values) — this marker is preserved as-is in hashed exports
 - All names and scopes are sorted alphabetically for deterministic diff output
 - Scope IDs are resolved to human-readable names (environment names, machine names, etc.)

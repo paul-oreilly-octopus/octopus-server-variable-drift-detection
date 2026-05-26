@@ -4,3 +4,5 @@ memory/
 MEMORY.md
 test-config.yaml
 .reflection-state.json
+__pycache__/
+*.pyc

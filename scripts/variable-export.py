@@ -16,9 +16,12 @@ Output:
 import argparse
 import base64
 import datetime
+import hashlib
+import hmac
 import re
 import sys
 from pathlib import Path
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -35,11 +38,44 @@ def sanitize_filename(url: str) -> str:
     return host
 
 
-def b64(value: str | None) -> str:
-    """Base64-encode a variable value, handling None/empty."""
-    if value is None:
-        return "==UNABLE_TO_DECODE=="
-    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+Encoder = Callable[[Optional[str]], str]
+
+
+def make_encoder(hash_values: bool, salt: Optional[bytes] = None) -> Encoder:
+    """Return a function that encodes a single variable value for the export.
+
+    hash_values=False -> reversible base64 (default; readable with
+                         variable-compare --decode).
+    hash_values=True  -> one-way SHA-256 (or HMAC-SHA256 if a salt is provided)
+                         prefixed with 'sha256:'. Drift detection still works
+                         because identical inputs produce identical digests.
+
+    NOTE: This is hashing, not encryption -- low-entropy values (env names,
+    port numbers, small enums) remain recoverable by hashing candidates. A
+    salt blocks pre-computed rainbow tables but does not protect against an
+    attacker who also has the salt.
+    """
+    if hash_values:
+        if salt is not None:
+            def _hash(value: Optional[str]) -> str:
+                if value is None:
+                    return "==UNABLE_TO_DECODE=="
+                digest = hmac.new(salt, value.encode("utf-8"), hashlib.sha256).hexdigest()
+                return f"sha256:{digest}"
+            return _hash
+
+        def _plain_hash(value: Optional[str]) -> str:
+            if value is None:
+                return "==UNABLE_TO_DECODE=="
+            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            return f"sha256:{digest}"
+        return _plain_hash
+
+    def _b64(value: Optional[str]) -> str:
+        if value is None:
+            return "==UNABLE_TO_DECODE=="
+        return base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return _b64
 
 
 class OctopusClient:
@@ -147,14 +183,14 @@ def resolve_scope(scope_values: dict, lookup: dict) -> dict:
     return resolved
 
 
-def format_variable(var: dict, lookup: dict) -> dict:
+def format_variable(var: dict, lookup: dict, encode: Encoder) -> dict:
     """Format a single Octopus variable into our YAML structure."""
     entry = {}
 
     if var.get("IsSensitive"):
         entry["value"] = "==UNABLE_TO_DECODE=="
     else:
-        entry["value"] = b64(var.get("Value"))
+        entry["value"] = encode(var.get("Value"))
 
     scope_values = var.get("Scope", {})
     scope = resolve_scope(scope_values, lookup)
@@ -163,7 +199,7 @@ def format_variable(var: dict, lookup: dict) -> dict:
     return entry
 
 
-def extract_variables(variable_set: dict, lookup: dict) -> dict:
+def extract_variables(variable_set: dict, lookup: dict, encode: Encoder) -> dict:
     """Extract variables from a variable set response into our YAML structure."""
     variables: dict[str, list] = {}
 
@@ -171,7 +207,7 @@ def extract_variables(variable_set: dict, lookup: dict) -> dict:
         name = var.get("Name", "")
         if not name:
             continue
-        entry = format_variable(var, lookup)
+        entry = format_variable(var, lookup, encode)
         variables.setdefault(name, []).append(entry)
 
     # Sort entries within each variable by scope for deterministic output
@@ -181,7 +217,7 @@ def extract_variables(variable_set: dict, lookup: dict) -> dict:
     return dict(sorted(variables.items()))
 
 
-def export_space(client: OctopusClient, space: dict) -> dict:
+def export_space(client: OctopusClient, space: dict, encode: Encoder) -> dict:
     """Export all variables from a single space."""
     space_id = space["Id"]
     space_name = space["Name"]
@@ -207,7 +243,7 @@ def export_space(client: OctopusClient, space: dict) -> dict:
             continue
         try:
             variable_set = client.get_variables(space_id, var_set_id)
-            variables = extract_variables(variable_set, lookup)
+            variables = extract_variables(variable_set, lookup, encode)
             if variables:
                 space_data["library_variable_sets"][set_name] = {
                     "variables": variables
@@ -225,7 +261,7 @@ def export_space(client: OctopusClient, space: dict) -> dict:
             continue
         try:
             variable_set = client.get_variables(space_id, var_set_id)
-            variables = extract_variables(variable_set, lookup)
+            variables = extract_variables(variable_set, lookup, encode)
             if variables:
                 space_data["projects"][project_name] = {"variables": variables}
         except requests.HTTPError as e:
@@ -249,7 +285,7 @@ def export_space(client: OctopusClient, space: dict) -> dict:
                     for env_id, value in env_values.items():
                         env_name = lookup["Environment"].get(env_id, env_id)
                         entry = {
-                            "value": b64(value) if value is not None else "==UNABLE_TO_DECODE==",
+                            "value": encode(value),
                             "project": proj_name,
                             "environment": env_name,
                         }
@@ -263,7 +299,7 @@ def export_space(client: OctopusClient, space: dict) -> dict:
                     for env_id, value in env_values.items():
                         env_name = lookup["Environment"].get(env_id, env_id)
                         entry = {
-                            "value": b64(value) if value is not None else "==UNABLE_TO_DECODE==",
+                            "value": encode(value),
                             "library_variable_set": lib_name,
                             "environment": env_name,
                         }
@@ -321,14 +357,82 @@ def main():
         dest="spaces",
         help="Space name to export (can be repeated; default: all spaces)",
     )
+    parser.add_argument(
+        "--hash-values",
+        action="store_true",
+        help=(
+            "Replace variable values with their SHA-256 hash so the export "
+            "can be shared without exposing actual values. Drift detection "
+            "still works (identical inputs produce identical hashes). NOTE: "
+            "this is hashing, not encryption -- low-entropy values (env "
+            "names, ports, small enums) remain recoverable by brute force "
+            "unless --salt-file is also used."
+        ),
+    )
+    parser.add_argument(
+        "--salt-file",
+        default=None,
+        help=(
+            "Path to a file whose contents are used as a salt (HMAC-SHA256 "
+            "key) when hashing values. The same salt must be used on every "
+            "server being compared. Requires --hash-values. Reading from a "
+            "file rather than the command line avoids leaking the salt via "
+            "process listings."
+        ),
+    )
     args = parser.parse_args()
 
-    # Read API key from file
+    if args.salt_file and not args.hash_values:
+        parser.error("--salt-file requires --hash-values")
+
+    salt: Optional[bytes] = None
+    if args.salt_file:
+        salt_path = Path(args.salt_file).expanduser()
+        if not salt_path.exists():
+            print(f"Error: salt file not found: {salt_path}", file=sys.stderr)
+            sys.exit(1)
+        salt = salt_path.read_bytes().rstrip(b"\r\n")
+        if not salt:
+            print(f"Error: salt file is empty: {salt_path}", file=sys.stderr)
+            sys.exit(1)
+
+    encode = make_encoder(hash_values=args.hash_values, salt=salt)
+
+    if args.hash_values:
+        msg = (
+            "WARNING: --hash-values replaces variable values with SHA-256 "
+            "hashes. This is ONE-WAY (hashing, not encryption) and only "
+            "protects high-entropy values; environment names, port numbers, "
+            "and similar low-entropy values can be recovered by hashing "
+            "candidates."
+        )
+        if salt is not None:
+            msg += (
+                " A salt is in use (HMAC-SHA256) which blocks pre-computed "
+                "rainbow tables, but an attacker who also has the salt can "
+                "still brute-force low-entropy values."
+            )
+        else:
+            msg += " Consider --salt-file to block rainbow-table attacks."
+        print(msg, file=sys.stderr)
+
+    # Read API key from file. Supports two formats:
+    #   1. raw key on a single line ("API-XXXX...")
+    #   2. structured file containing a "key: API-XXXX..." line alongside
+    #      metadata (Created/Expires/User/Usage etc.)
     key_path = Path(args.api_key_file).expanduser()
     if not key_path.exists():
         print(f"Error: API key file not found: {key_path}", file=sys.stderr)
         sys.exit(1)
-    api_key = key_path.read_text().strip()
+    key_raw = key_path.read_text()
+    api_key = None
+    for line in key_raw.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("key:"):
+            api_key = stripped.split(":", 1)[1].strip()
+            break
+    if not api_key:
+        api_key = key_raw.strip()
 
     client = OctopusClient(args.server_url, api_key)
 
@@ -368,14 +472,15 @@ def main():
     export_data = {}
     for space in sorted(spaces, key=lambda s: s["Name"]):
         space_name = space["Name"]
-        space_data = export_space(client, space)
+        space_data = export_space(client, space, encode)
         if space_data:
             export_data[space_name] = space_data
 
     # Generate output filename
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     server_prefix = sanitize_filename(args.server_url)
-    filename = f"{server_prefix}.{timestamp}-variables.yaml"
+    suffix = "-hashed" if args.hash_values else ""
+    filename = f"{server_prefix}.{timestamp}-variables{suffix}.yaml"
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

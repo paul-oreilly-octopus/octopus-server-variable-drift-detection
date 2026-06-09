@@ -14,12 +14,21 @@ different list position in each file will NOT be reported as a difference.
 
 Usage:
     python variable-compare.py onprem-variables.yaml cloud-variables.yaml
+    python variable-compare.py --ignore-case-keys --ignore-case-values onprem-variables.yaml cloud-variables.yaml
     python variable-compare.py --decode onprem-variables.yaml cloud-variables.yaml
     python variable-compare.py --decode onprem-variables.yaml
 
 With --decode, base64-encoded variable values are decoded in memory before
 comparison or display. With a single file and --decode, the file's variables
 are displayed with decoded values (no comparison is performed).
+
+With --ignore-case-keys, all dict keys (project names, library set names, variable
+names) are lowercased before comparison. Use when the same project or variable is
+named differently in case across instances (e.g. IDEX-suite vs IDEX-Suite).
+
+With --ignore-case-values, scope labels (environment/machine names) are lowercased
+before comparison. Use when the same environment has inconsistent capitalisation
+(e.g. ABPTEST vs ABPTest). For cross-instance comparison, use both flags together.
 
 Exit codes:
     0  no differences (or single-file display mode)
@@ -56,6 +65,48 @@ def decode_values_in_place(obj) -> None:
     elif isinstance(obj, list):
         for item in obj:
             decode_values_in_place(item)
+
+
+def normalize_keys_in_place(obj) -> None:
+    """Lowercase all string dict keys throughout the YAML structure.
+
+    Suppresses false positives when project names, library set names, or variable
+    names have inconsistent capitalisation across Octopus instances
+    (e.g. IDEX-suite vs IDEX-Suite, LOGLogin vs LogLogin).
+    """
+    if isinstance(obj, dict):
+        keys = list(obj.keys())
+        for k in keys:
+            new_k = k.lower() if isinstance(k, str) else k
+            val = obj.pop(k)
+            normalize_keys_in_place(val)
+            obj[new_k] = val
+    elif isinstance(obj, list):
+        for item in obj:
+            normalize_keys_in_place(item)
+
+
+def normalize_scopes_in_place(obj) -> None:
+    """Walk a parsed YAML structure and lowercase all strings within 'scope' dicts.
+
+    Suppresses false positives when environment/machine names have inconsistent
+    capitalisation across Octopus instances (e.g. ABPTEST vs ABPTest).
+    """
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if key == "scope" and isinstance(val, dict):
+                for scope_key, scope_val in val.items():
+                    if isinstance(scope_val, list):
+                        val[scope_key] = [
+                            s.lower() if isinstance(s, str) else s for s in scope_val
+                        ]
+                    elif isinstance(scope_val, str):
+                        val[scope_key] = scope_val.lower()
+            else:
+                normalize_scopes_in_place(val)
+    elif isinstance(obj, list):
+        for item in obj:
+            normalize_scopes_in_place(item)
 
 
 def canonical(obj):
@@ -229,6 +280,24 @@ def main():
         help="Decode base64 variable values in memory before comparison or display",
     )
     parser.add_argument(
+        "--ignore-case-keys",
+        action="store_true",
+        help=(
+            "Lowercase all dict keys (project names, library set names, variable names) "
+            "before comparison. Suppresses false positives from capitalisation differences "
+            "in Octopus entity names (e.g. IDEX-suite vs IDEX-Suite)."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-case-values",
+        action="store_true",
+        help=(
+            "Lowercase scope labels (environment/machine names) before comparison. "
+            "Suppresses false positives from capitalisation differences in environment "
+            "names across Octopus instances (e.g. ABPTEST vs ABPTest)."
+        ),
+    )
+    parser.add_argument(
         "--label-a",
         default=None,
         help="Label for first file in report (default: filename)",
@@ -271,6 +340,14 @@ def main():
     if args.decode:
         decode_values_in_place(data_a)
         decode_values_in_place(data_b)
+
+    if args.ignore_case_keys:
+        normalize_keys_in_place(data_a)
+        normalize_keys_in_place(data_b)
+
+    if args.ignore_case_values:
+        normalize_scopes_in_place(data_a)
+        normalize_scopes_in_place(data_b)
 
     label_a = args.label_a or str(path_a)
     label_b = args.label_b or str(path_b)

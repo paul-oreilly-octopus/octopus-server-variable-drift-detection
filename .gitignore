@@ -6,3 +6,5 @@ test-config.yaml
 .reflection-state.json
 __pycache__/
 *.pyc
+tests/idex*yaml
+tests/octopus*yaml
